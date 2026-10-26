@@ -44,8 +44,10 @@ jobs:
             git push origin HEAD:main
           fi
       - name: Consultar clima e preservar histórico
+        if: github.event_name != 'push'
         run: python scripts/update_weather.py
       - name: Salvar dados no repositório
+        if: github.event_name != 'push'
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
