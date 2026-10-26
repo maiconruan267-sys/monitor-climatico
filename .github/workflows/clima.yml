@@ -1,0 +1,53 @@
+name: Atualizar clima e publicar
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: monitor-climatico
+  cancel-in-progress: false
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Consultar clima e preservar histórico
+        run: python scripts/update_weather.py
+      - name: Salvar dados no repositório
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add _sistema/dados_clima.js historico/
+          if ! git diff --cached --quiet; then
+            git commit -m 'Atualizar clima e histórico diário'
+            git push origin HEAD:main
+          fi
+      - name: Preparar site
+        run: |
+          mkdir -p public/_sistema
+          cp index.html .nojekyll public/
+          cp _sistema/dados_clima.js _sistema/malhas.js public/_sistema/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+  publicar:
+    needs: atualizar
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - name: Publicar no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
