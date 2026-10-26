@@ -1723,6 +1723,8 @@ input,select{outline:none!important;transition:border-color .15s,box-shadow .15s
 </section>
 <section class="section city-registration"><h2>Cidades cadastradas <span id="registeredCount"></span></h2>
 <div class="control"><label for="registeredSearch">Consultar cidade ou UF</label><input id="registeredSearch" type="search" placeholder="Digite para filtrar…"></div>
+<p><button type="button" class="primary" id="exportRegisteredCities">Exportar todas as cidades (CSV)</button></p>
+<p class="registration-help">Baixa o cadastro completo, independentemente do filtro, com cidade, UF, latitude e longitude. Para cruzar com sua base, use cidade e UF em conjunto.</p>
 <p><a href="https://github.com/maiconruan267-sys/monitor-climatico/issues" target="_blank" rel="noopener">Acompanhar solicitações de cadastro ↗</a></p>
 <div class="scroll" style="max-height:480px"><table class="data"><thead><tr><th>Cidade</th><th>UF</th><th>Latitude</th><th>Longitude</th><th>Dados climáticos</th></tr></thead><tbody id="registeredRows"></tbody></table></div>
 </section></div>
@@ -2494,6 +2496,19 @@ initAppTabs();renderSelectedCities();renderHmSelectedCities();renderTblSelectedC
   document.getElementById('registeredCount').textContent=cities.length+' de '+CITIES.length;
   document.getElementById('registeredRows').innerHTML=cities.map(c=>'<tr><td>'+esc(c.city)+'</td><td>'+esc(c.st)+'</td><td>'+Number(c.lat).toFixed(6)+'</td><td>'+Number(c.lon).toFixed(6)+'</td><td>'+((window.DADOS_CLIMA?.cidades||[]).some(d=>normalizeCity(d.cidade)===normalizeCity(c.city)&&d.uf===c.st)?'Disponíveis':'Aguardando coleta')+'</td></tr>').join('')||'<tr><td colspan="5">Nenhuma cidade encontrada.</td></tr>';
  }
+
+ function registeredCitiesCsv(cities){
+  const cell=value=>'"'+String(value??'').replace(/"/g,'""')+'"';
+  const rows=[['Cidade','UF','Latitude','Longitude'],...cities.map(c=>[c.city,c.st,String(c.lat).replace('.',','),String(c.lon).replace('.',',')])];
+  return '\uFEFF'+rows.map(row=>row.map(cell).join(';')).join('\r\n')+'\r\n';
+ }
+ document.getElementById('exportRegisteredCities').addEventListener('click',()=>{
+  const csv=registeredCitiesCsv(CITIES);
+  const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));
+  const link=document.createElement('a');
+  link.href=url;link.download='cidades_cadastradas.csv';document.body.appendChild(link);
+  link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+ });
  document.getElementById('registeredSearch').addEventListener('input',renderRegistered);
  document.getElementById('cityRegistrationForm').addEventListener('submit',e=>{
   e.preventDefault();const status=document.getElementById('registrationStatus');
