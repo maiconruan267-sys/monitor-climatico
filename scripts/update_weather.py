@@ -3,7 +3,7 @@ import csv
 import json
 import math
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -36,6 +36,48 @@ def merge_city(old, new):
 
 def key(city):
     return city['uf'].strip().upper(), city['cidade'].strip().upper()
+
+def is_current(city, location, today, payload):
+    """Reuse only today's complete data for the same registered coordinates."""
+    if not city:
+        return False
+    stamp = city.get('atualizado_em')
+    # Legacy bases had only a global timestamp. Trust it only for a full run.
+    if 'atualizado_em' not in city and payload.get('status') == 'completo':
+        stamp = payload.get('atualizado_em')
+    try:
+        if datetime.fromisoformat(stamp).astimezone(ZoneInfo('America/Sao_Paulo')).date().isoformat() != today:
+            return False
+        for field, column in (('latitude', 'Latitude'), ('longitude', 'Longitude')):
+            if not math.isclose(float(city[field]), float(location[column].replace(',', '.')), rel_tol=0, abs_tol=1e-7):
+                return False
+        daily = city['daily']
+        dates = daily['time']
+        if len(dates) != len(set(dates)):
+            return False
+        expected = [(date.fromisoformat(today) + timedelta(days=i)).isoformat() for i in range(-15, 16)]
+        indexes = [dates.index(day) for day in expected]
+        for field in FIELDS:
+            values = daily[field]
+            if len(values) != len(dates):
+                return False
+            if field in ('min', 'max', 'rain', 'weather_code'):
+                if any(not isinstance(values[i], (int, float)) or not math.isfinite(values[i]) for i in indexes):
+                    return False
+        return True
+    except (TypeError, ValueError, KeyError, IndexError):
+        return False
+
+def select_pending(locations, payload, today):
+    cities = {key(c): c for c in payload['cidades']}
+    pending, reused = [], []
+    for location in locations:
+        city = cities.get((location['UF'].strip().upper(), location['Cidade'].strip().upper()))
+        if is_current(city, location, today, payload):
+            reused.append(city)
+        else:
+            pending.append(location)
+    return pending, reused
 
 def validate_daily(daily, today):
     dates = daily.get('time', [])
@@ -131,28 +173,40 @@ def main():
         locations = list(csv.DictReader(f, delimiter=';'))
     if not locations:
         raise ValueError('Lista de cidades vazia.')
+    pending, reused = select_pending(locations, old, today)
+    print(f'Cadastro: {len(locations)} cidades; {len(reused)} já atualizadas hoje; '
+          f'{len(pending)} precisam de coleta.', flush=True)
+    if not pending:
+        print('Base atualizada: nenhuma consulta à API necessária.', flush=True)
+        return
     new, errors = [], []
     started = time.monotonic()
-    batches = math.ceil(len(locations) / BATCH_SIZE)
-    for offset in range(0, len(locations), BATCH_SIZE):
-        batch = locations[offset:offset + BATCH_SIZE]
+    batches = math.ceil(len(pending) / BATCH_SIZE)
+    for offset in range(0, len(pending), BATCH_SIZE):
+        batch = pending[offset:offset + BATCH_SIZE]
         found, failed = fetch_adaptive(batch, today)
         new.extend(found)
         errors.extend(failed)
         elapsed = time.monotonic() - started
-        done = min(offset + BATCH_SIZE, len(locations))
-        print(f'Lote {offset // BATCH_SIZE + 1}/{batches}: {done}/{len(locations)} cidades; '
+        done = min(offset + BATCH_SIZE, len(pending))
+        print(f'Lote {offset // BATCH_SIZE + 1}/{batches}: {done}/{len(pending)} cidades pendentes; '
               f'{len(errors)} falhas; {elapsed:.1f}s decorridos', flush=True)
-    if len(new) < math.ceil(len(locations) * .95):
+    if len(new) < math.ceil(len(pending) * .95):
         raise RuntimeError('Menos de 95% das cidades atualizadas. Base anterior preservada.')
     cities = {key(c): c for c in old['cidades']}
+    # Freeze legacy provenance before advancing the global update timestamp.
+    for city in cities.values():
+        if 'atualizado_em' not in city:
+            city['atualizado_em'] = old.get('atualizado_em') if old.get('status') == 'completo' else None
     for city in new:
+        city['atualizado_em'] = now.isoformat(timespec='seconds')
         cities[key(city)] = merge_city(cities.get(key(city), {}), city)
     dates = sorted({day for c in cities.values() for day in c['daily']['time']})
     payload = dict(old, duracao_coleta_segundos=round(time.monotonic() - started, 1), tamanho_lote=BATCH_SIZE, status='parcial' if errors else 'completo',
         atualizado_em=now.isoformat(timespec='seconds'), hoje=today,
-        total_esperado=len(locations), total_retornado=len(new),
-        percentual=round(len(new)/len(locations)*100, 1), erros=errors,
+        total_esperado=len(locations), total_retornado=len(new) + len(reused),
+        total_consultado=len(pending), total_atualizado=len(new), total_reaproveitado=len(reused),
+        percentual=round((len(new) + len(reused))/len(locations)*100, 1), erros=errors,
         cidades=list(cities.values()), periodo_armazenado_inicio=dates[0],
         periodo_armazenado_fim=dates[-1], datas_armazenadas=len(dates))
     content = json.dumps(payload, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
@@ -163,3 +217,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
