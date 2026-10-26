@@ -1455,6 +1455,25 @@ input,select{outline:none!important;transition:border-color .15s,box-shadow .15s
   }
 }
 
+
+#tabCities .city-registration{border:1px solid var(--line);border-radius:18px;background:var(--panel);box-shadow:var(--shadow);margin-bottom:22px}
+#tabCities h3{margin:4px 0 0;font-size:20px}
+.catalog-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:0 0 24px}
+.catalog-stat{padding:20px 24px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:var(--shadow)}
+.catalog-stat span{display:block;color:var(--muted);font-size:13px}.catalog-stat strong{display:block;font-size:30px;margin-top:6px;color:var(--ink)}
+.catalog-add{border-top:3px solid var(--accent)!important}.catalog-tag{border-radius:20px;padding:7px 12px;background:#eff6ff;color:#1d4ed8;font-size:13px;font-weight:600}
+.catalog-link{color:var(--accent);font-weight:600;text-decoration:none}
+#tabCities input,#tabCities select{width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;background:#f8fafc}
+#tabCities button{border-radius:10px;padding:10px 16px;cursor:pointer}
+.catalog-list .control{max-width:520px;margin-top:20px}
+.catalog-list thead{position:sticky;top:0;background:#f1f5f9;z-index:1}
+.catalog-list tbody tr:hover{background:#f8fafc}
+.catalog-danger{background:#fff1f2;color:#be123c;border:1px solid #fecdd3}
+.catalog-dialog{max-width:500px;width:calc(100% - 32px);padding:28px;border:1px solid var(--line);border-radius:18px;color:var(--ink);box-shadow:var(--shadow)}
+.catalog-dialog::backdrop{background:rgba(15,27,45,.45)}.catalog-actions{display:flex;gap:12px;justify-content:flex-end;flex-wrap:wrap;margin-top:24px}
+#removalStatus{margin-top:16px}
+@media(max-width:650px){.catalog-stats{grid-template-columns:repeat(2,1fr)}.catalog-stat{padding:16px}.catalog-list .scroll{overflow:auto}}
+
 </style>
 <script src="_sistema/dados_clima.js"></script>
 <script src="_sistema/locais.js"></script>
@@ -1705,8 +1724,10 @@ input,select{outline:none!important;transition:border-color .15s,box-shadow .15s
   </div>
 
 <div class="tab-panel" id="tabCities" role="tabpanel" data-tab-panel="cities" aria-hidden="true">
-<section class="section city-registration">
-<h2>Cadastro de cidades <span>RS · SC · PR</span></h2>
+<div class="summary-heading"><div><span class="section-kicker">Cobertura do monitor</span><h2>Gestão de cidades</h2><p>Consulte o cadastro e solicite inclusões ou remoções em um só lugar.</p></div><a class="catalog-link" href="https://github.com/maiconruan267-sys/monitor-climatico/issues" target="_blank" rel="noopener">Acompanhar solicitações ↗</a></div>
+<div class="catalog-stats" id="catalogStats"></div>
+<section class="section city-registration catalog-add">
+<div class="dashboard-card-head"><div><span class="section-kicker">Ampliar cobertura</span><h3>Adicionar cidade</h3></div><span class="catalog-tag">RS · SC · PR</span></div>
 <p>Inclua uma cidade para que ela passe a fazer parte das coletas e das visões do monitor.</p>
 <form id="cityRegistrationForm">
 <div class="registration-grid">
@@ -1721,12 +1742,15 @@ input,select{outline:none!important;transition:border-color .15s,box-shadow .15s
 <div id="registrationStatus" role="status" aria-live="polite"></div>
 </form>
 </section>
-<section class="section city-registration"><h2>Cidades cadastradas <span id="registeredCount"></span></h2>
+<section class="section city-registration catalog-list"><div class="dashboard-card-head"><div><span class="section-kicker">Cadastro compartilhado</span><h3>Cidades cadastradas</h3></div><span class="catalog-tag" id="registeredCount"></span></div>
 <div class="control"><label for="registeredSearch">Consultar cidade ou UF</label><input id="registeredSearch" type="search" placeholder="Digite para filtrar…"></div>
 <p><button type="button" class="primary" id="exportRegisteredCities">Exportar todas as cidades (CSV)</button></p>
 <p class="registration-help">Baixa o cadastro completo, independentemente do filtro, com cidade, UF, latitude e longitude. Para cruzar com sua base, use cidade e UF em conjunto.</p>
 <p><a href="https://github.com/maiconruan267-sys/monitor-climatico/issues" target="_blank" rel="noopener">Acompanhar solicitações de cadastro ↗</a></p>
-<div class="scroll" style="max-height:480px"><table class="data"><thead><tr><th>Cidade</th><th>UF</th><th>Latitude</th><th>Longitude</th><th>Dados climáticos</th></tr></thead><tbody id="registeredRows"></tbody></table></div>
+<div class="scroll" style="max-height:480px"><table class="data"><thead><tr><th>Cidade</th><th>UF</th><th>Latitude</th><th>Longitude</th><th>Dados climáticos</th><th>Ações</th></tr></thead><tbody id="registeredRows"></tbody></table></div>
+<p class="registration-help">A remoção retira a cidade do monitoramento ativo e das próximas coletas. O histórico já salvo permanece preservado.</p>
+<div id="removalStatus" role="status" aria-live="polite"></div>
+<dialog id="removeCityDialog" class="catalog-dialog"><form method="dialog"><span class="section-kicker">Revisar solicitação</span><h2>Solicitar remoção?</h2><p id="removeCityName"></p><p>A cidade deixará o cadastro ativo após o processamento. O histórico salvo será preservado.</p><p class="registration-help">Você ainda precisará confirmar o envio no GitHub com a conta proprietária.</p><div class="catalog-actions"><button value="cancel">Manter cidade</button><button type="button" id="confirmRemoveCity" class="catalog-danger">Continuar no GitHub ↗</button></div></form></dialog>
 </section></div>
 </main>
 </div>
@@ -1796,7 +1820,7 @@ async function fetchBatchAdaptive(batch,label){try{return{data:await fetchCombin
 async function runPool(list){const data=[],failed=[];let processed=0;for(let i=0;i<list.length;i++){setProgress(processed,CITIES.length,'Consultando lote '+(i+1)+' de '+list.length+' · histórico + previsão…');const r=await fetchBatchAdaptive(list[i],'lote '+(i+1));data.push(...r.data);failed.push(...r.failed);processed+=list[i].length;setProgress(processed,CITIES.length,'Processadas '+processed+' de '+CITIES.length+' cidades · '+data.length+' carregadas');if(i<list.length-1)await sleep(REQUEST_DELAY_MS)}return{data,failed}}
 function localDataset(){
   const src=window.DADOS_CLIMA||{},today=src.hoje||todayIso();
-  return (src.cidades||[]).map(c=>{
+  return (src.cidades||[]).filter(c=>CITIES.some(loc=>loc.st===(c.uf||c.st)&&loc.city.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase()===(c.cidade||c.city).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase())).map(c=>{
     const d=c.daily||{},time=d.time||[],source=Array.isArray(d.source)?d.source:time.map(iso=>iso<today?'Open‑Meteo histórico recente':'Open‑Meteo previsão');
     return{st:c.uf||c.st,city:c.cidade||c.city,lat:+(c.latitude??c.lat),lon:+(c.longitude??c.lon),daily:{
       time,
@@ -2490,11 +2514,28 @@ initAppTabs();renderSelectedCities();renderHmSelectedCities();renderTblSelectedC
 <script>
 (()=>{
  const normalizeCity=s=>String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toUpperCase();
+ let removalCity=null;
+ document.getElementById('catalogStats').innerHTML=[['Cidades cadastradas',CITIES.length],...['RS','SC','PR'].map(st=>[st,CITIES.filter(c=>c.st===st).length])].map(([label,count])=>'<div class="catalog-stat"><span>'+label+'</span><strong>'+count+'</strong></div>').join('');
+ document.getElementById('registeredRows').addEventListener('click',e=>{
+  const button=e.target.closest('[data-remove-city]');if(!button)return;
+  removalCity=CITIES[Number(button.dataset.removeCity)];if(!removalCity)return;
+  document.getElementById('removeCityName').textContent=removalCity.city+' / '+removalCity.st;
+  document.getElementById('removeCityDialog').showModal();
+ });
+ document.getElementById('confirmRemoveCity').addEventListener('click',()=>{
+  if(!removalCity)return;
+  const payload={cidade:removalCity.city,uf:removalCity.st};
+  const body='Remoção solicitada pelo Monitor Climático. Preservar o histórico salvo.\n\n```json\n'+JSON.stringify(payload,null,2)+'\n```\n';
+  const url='https://github.com/maiconruan267-sys/monitor-climatico/issues/new?title='+encodeURIComponent('[Remoção de cidade] '+removalCity.city+' / '+removalCity.st)+'&body='+encodeURIComponent(body);
+  document.getElementById('removalStatus').innerHTML='Solicitação preparada. <a target="_blank" rel="noopener" href="'+esc(url)+'">Confirmar remoção no GitHub ↗</a>. A cidade ainda não foi removida.';
+  document.getElementById('removeCityDialog').close();
+  window.open(url,'_blank','noopener');removalCity=null;
+ });
  function renderRegistered(){
   const query=normalizeCity(document.getElementById('registeredSearch').value);
   const cities=CITIES.filter(c=>normalizeCity(c.city+' '+c.st).includes(query));
   document.getElementById('registeredCount').textContent=cities.length+' de '+CITIES.length;
-  document.getElementById('registeredRows').innerHTML=cities.map(c=>'<tr><td>'+esc(c.city)+'</td><td>'+esc(c.st)+'</td><td>'+Number(c.lat).toFixed(6)+'</td><td>'+Number(c.lon).toFixed(6)+'</td><td>'+((window.DADOS_CLIMA?.cidades||[]).some(d=>normalizeCity(d.cidade)===normalizeCity(c.city)&&d.uf===c.st)?'Disponíveis':'Aguardando coleta')+'</td></tr>').join('')||'<tr><td colspan="5">Nenhuma cidade encontrada.</td></tr>';
+  document.getElementById('registeredRows').innerHTML=cities.map(c=>'<tr><td>'+esc(c.city)+'</td><td>'+esc(c.st)+'</td><td>'+Number(c.lat).toFixed(6)+'</td><td>'+Number(c.lon).toFixed(6)+'</td><td>'+((window.DADOS_CLIMA?.cidades||[]).some(d=>normalizeCity(d.cidade)===normalizeCity(c.city)&&d.uf===c.st)?'Disponíveis':'Aguardando coleta')+'</td><td><button type="button" class="catalog-danger" data-remove-city="'+CITIES.indexOf(c)+'">Solicitar remoção</button></td></tr>').join('')||'<tr><td colspan="6">Nenhuma cidade encontrada.</td></tr>';
  }
 
  function registeredCitiesCsv(cities){
@@ -2529,3 +2570,4 @@ initAppTabs();renderSelectedCities();renderHmSelectedCities();renderTblSelectedC
 })();
 </script></body>
 </html>
+
