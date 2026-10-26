@@ -4,23 +4,45 @@ on:
     branches: [main]
   schedule:
     - cron: '17 9 * * *'
+  issues:
+    types: [opened, reopened]
   workflow_dispatch:
 permissions:
   contents: write
   pages: write
   id-token: write
+  issues: write
 concurrency:
   group: monitor-climatico
   cancel-in-progress: false
 jobs:
   atualizar:
+    if: github.event_name != 'issues' || (startsWith(github.event.issue.title, '[Cadastro de cidade]') && github.event.issue.user.login == github.repository_owner)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Validar regras de histórico e cadastro
+        run: python -m unittest discover -s tests
+      - name: Cadastrar cidade
+        if: github.event_name == 'issues'
+        run: python scripts/register_city.py
+      - name: Salvar cadastro compartilhado
+        if: github.event_name == 'issues'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add _sistema/Locais.csv _sistema/locais.js
+          if ! git diff --cached --quiet; then
+            git commit -m 'Cadastrar cidade no monitor climático'
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
       - name: Consultar clima e preservar histórico
         run: python scripts/update_weather.py
       - name: Salvar dados no repositório
@@ -30,13 +52,14 @@ jobs:
           git add _sistema/dados_clima.js historico/
           if ! git diff --cached --quiet; then
             git commit -m 'Atualizar clima e histórico diário'
+            git pull --rebase origin main
             git push origin HEAD:main
           fi
       - name: Preparar site
         run: |
           mkdir -p public/_sistema
           cp index.html .nojekyll public/
-          cp _sistema/dados_clima.js _sistema/malhas.js public/_sistema/
+          cp _sistema/dados_clima.js _sistema/malhas.js _sistema/locais.js public/_sistema/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public

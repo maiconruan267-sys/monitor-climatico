@@ -25,3 +25,9 @@ Clima: [Open-Meteo](https://open-meteo.com/), dados modelados de histórico rece
 ## Verificação local
 
 Execute `python -m unittest discover -s tests` para verificar preservação de histórico e rejeição de respostas incompletas. Sirva a raiz com `python -m http.server 8000` para abrir a interface.
+
+## Cadastro de cidades
+
+Na quarta aba, preencha cidade, UF, latitude e longitude. O botão abre uma solicitação preenchida no GitHub; confirme com Create/Submit new issue usando a conta proprietária do repositório. Nenhum token fica no site. A automação aceita somente solicitações criadas pelo proprietário, valida UF, coordenadas e duplicidades (ignorando acentos), grava a lista compartilhada e inicia uma coleta.
+
+O cadastro passa a constar em `_sistema/Locais.csv` e `_sistema/locais.js`; os painéis utilizam a nova cidade quando sua coleta termina. A tabela de cadastro mostra as cidades cadastradas e se possuem dados. As solicitações permanecem nas Issues para acompanhamento; o resultado técnico de cada execução fica em Actions. Se a coleta falhar depois do cadastro, o cadastro permanece salvo e será retomado na próxima atualização.
