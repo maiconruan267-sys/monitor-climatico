@@ -43,6 +43,19 @@ def remove_city(value, rows):
         raise ValueError('Mantenha pelo menos uma cidade no monitor.')
     return [r for r in rows if r is not matches[0]]
 
+def add_city(value, rows):
+    row = validate(value, [])
+    matches = [r for r in rows if normalize(r['Cidade']) == normalize(row['Cidade']) and r['UF'] == row['UF']]
+    if matches:
+        if len(matches) == 1 and all(
+            math.isclose(float(matches[0][field].replace(',', '.')), float(row[field]), rel_tol=0, abs_tol=1e-7)
+            for field in ('Latitude', 'Longitude')
+        ):
+            print('Cadastro já aplicado; retomando verificação do clima.')
+            return rows
+        raise ValueError('Cidade já cadastrada com coordenadas diferentes ou cadastro ambíguo.')
+    return rows + [row]
+
 def main():
     event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
     issue = event['issue']
@@ -61,8 +74,7 @@ def main():
     if removal:
         rows = remove_city(payload, rows)
     else:
-        row = validate(payload, rows)
-        rows.append(row)
+        rows = add_city(payload, rows)
     rows.sort(key=lambda r: (normalize(r['Cidade']), r['UF']))
     with path.open('w', encoding='utf-8', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=['Cidade','UF','Latitude','Longitude'], delimiter=';')
