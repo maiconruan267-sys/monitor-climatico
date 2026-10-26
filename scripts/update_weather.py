@@ -5,6 +5,7 @@ import math
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -47,26 +48,73 @@ def validate_daily(daily, today):
         if any(v is None for v in daily[field]):
             raise ValueError('Valores essenciais ausentes: ' + field)
 
-def fetch_city(local, today):
-    query = urlencode(dict(latitude=local['Latitude'].replace(',', '.'),
-        longitude=local['Longitude'].replace(',', '.'), daily=','.join(FIELDS.values()),
-        timezone='America/Sao_Paulo', wind_speed_unit='kmh', past_days=15, forecast_days=16))
+BATCH_SIZE = 7
+REQUEST_INTERVAL = 10.0
+_next_request = 0.0
+
+class RateLimitError(RuntimeError):
+    pass
+
+def wait_for_request():
+    global _next_request
+    time.sleep(max(0, _next_request - time.monotonic()))
+    _next_request = time.monotonic() + REQUEST_INTERVAL
+
+def fetch_batch(locations, today):
+    query = urlencode(dict(latitude=','.join(r['Latitude'].replace(',', '.') for r in locations),
+        longitude=','.join(r['Longitude'].replace(',', '.') for r in locations),
+        daily=','.join(FIELDS.values()), timezone='America/Sao_Paulo',
+        wind_speed_unit='kmh', past_days=15, forecast_days=16))
     req = Request('https://api.open-meteo.com/v1/forecast?' + query,
-                  headers={'User-Agent': 'Monitor-Climatico-Sul/10.0'})
+                  headers={'User-Agent': 'Monitor-Climatico-Sul/10.1'})
     for attempt in range(3):
+        wait_for_request()
         try:
-            with urlopen(req, timeout=60) as response:
+            with urlopen(req, timeout=90) as response:
                 result = json.load(response)
-            validate_daily(result['daily'], today)
-            return dict(cidade=local['Cidade'], uf=local['UF'],
-                latitude=float(local['Latitude'].replace(',', '.')),
-                longitude=float(local['Longitude'].replace(',', '.')),
-                timezone='America/Sao_Paulo',
-                daily={'time': result['daily']['time'], **{k: result['daily'][v] for k,v in FIELDS.items()}})
+            if not isinstance(result, list):
+                result = [result]
+            if len(result) != len(locations):
+                raise ValueError('Quantidade de cidades incompleta no lote.')
+            output = []
+            for local, item in zip(locations, result):
+                validate_daily(item['daily'], today)
+                output.append(dict(cidade=local['Cidade'], uf=local['UF'],
+                    latitude=float(local['Latitude'].replace(',', '.')),
+                    longitude=float(local['Longitude'].replace(',', '.')),
+                    timezone='America/Sao_Paulo',
+                    daily={'time': item['daily']['time'], **{k: item['daily'][v] for k,v in FIELDS.items()}}))
+            return output
+        except HTTPError as exc:
+            if exc.code == 429:
+                if attempt == 2:
+                    raise RateLimitError('Limite da API persistente; base anterior preservada.') from exc
+                header = exc.headers.get('Retry-After', '') if exc.headers else ''
+                delay = max(60 * (attempt + 1), float(header) if header.isdigit() else 0)
+                print(f'API limitou consultas; aguardando {delay:.0f}s.', flush=True)
+                time.sleep(delay)
+            elif attempt == 2:
+                raise
+            else:
+                time.sleep(10 * (attempt + 1))
         except Exception:
             if attempt == 2:
                 raise
             time.sleep(10 * (attempt + 1))
+
+def fetch_adaptive(locations, today):
+    try:
+        return fetch_batch(locations, today), []
+    except RateLimitError:
+        raise  # Never split a throttled batch into even more requests.
+    except Exception as exc:
+        if len(locations) == 1:
+            row = locations[0]
+            return [], [dict(cidade=row['Cidade'], uf=row['UF'], erro=str(exc))]
+        mid = len(locations) // 2
+        left, errors_left = fetch_adaptive(locations[:mid], today)
+        right, errors_right = fetch_adaptive(locations[mid:], today)
+        return left + right, errors_left + errors_right
 
 def save_atomic(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,20 +132,24 @@ def main():
     if not locations:
         raise ValueError('Lista de cidades vazia.')
     new, errors = [], []
-    for i, local in enumerate(locations, 1):
-        try:
-            new.append(fetch_city(local, today))
-        except Exception as exc:
-            errors.append(dict(cidade=local['Cidade'], uf=local['UF'], erro=str(exc)))
-        print(f'{i}/{len(locations)} cidades; {len(errors)} falhas', flush=True)
-        time.sleep(1.1)
+    started = time.monotonic()
+    batches = math.ceil(len(locations) / BATCH_SIZE)
+    for offset in range(0, len(locations), BATCH_SIZE):
+        batch = locations[offset:offset + BATCH_SIZE]
+        found, failed = fetch_adaptive(batch, today)
+        new.extend(found)
+        errors.extend(failed)
+        elapsed = time.monotonic() - started
+        done = min(offset + BATCH_SIZE, len(locations))
+        print(f'Lote {offset // BATCH_SIZE + 1}/{batches}: {done}/{len(locations)} cidades; '
+              f'{len(errors)} falhas; {elapsed:.1f}s decorridos', flush=True)
     if len(new) < math.ceil(len(locations) * .95):
         raise RuntimeError('Menos de 95% das cidades atualizadas. Base anterior preservada.')
     cities = {key(c): c for c in old['cidades']}
     for city in new:
         cities[key(city)] = merge_city(cities.get(key(city), {}), city)
     dates = sorted({day for c in cities.values() for day in c['daily']['time']})
-    payload = dict(old, status='parcial' if errors else 'completo',
+    payload = dict(old, duracao_coleta_segundos=round(time.monotonic() - started, 1), tamanho_lote=BATCH_SIZE, status='parcial' if errors else 'completo',
         atualizado_em=now.isoformat(timespec='seconds'), hoje=today,
         total_esperado=len(locations), total_retornado=len(new),
         percentual=round(len(new)/len(locations)*100, 1), erros=errors,
