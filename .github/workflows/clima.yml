@@ -3,7 +3,8 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: '17 9 * * *'
+    # Todos os dias às 08:15 de Brasília (UTC-3).
+    - cron: '15 11 * * *'
   issues:
     types: [opened, reopened]
   workflow_dispatch:
