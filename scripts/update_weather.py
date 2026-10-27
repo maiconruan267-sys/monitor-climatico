@@ -5,7 +5,7 @@ import math
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -92,6 +92,7 @@ def validate_daily(daily, today):
 
 BATCH_SIZE = 7
 REQUEST_INTERVAL = 10.0
+COLLECTION_BUDGET = 70 * 60
 _next_request = 0.0
 
 class RateLimitError(RuntimeError):
@@ -112,7 +113,7 @@ def fetch_batch(locations, today):
     for attempt in range(3):
         wait_for_request()
         try:
-            with urlopen(req, timeout=90) as response:
+            with urlopen(req, timeout=30) as response:
                 result = json.load(response)
             if not isinstance(result, list):
                 result = [result]
@@ -128,6 +129,7 @@ def fetch_batch(locations, today):
                     daily={'time': item['daily']['time'], **{k: item['daily'][v] for k,v in FIELDS.items()}}))
             return output
         except HTTPError as exc:
+            print(f'HTTP {exc.code}; lote de {len(locations)} cidades; tentativa {attempt + 1}/3', flush=True)
             if exc.code == 429:
                 if attempt == 2:
                     raise RateLimitError('Limite da API persistente; base anterior preservada.') from exc
@@ -139,7 +141,8 @@ def fetch_batch(locations, today):
                 raise
             else:
                 time.sleep(10 * (attempt + 1))
-        except Exception:
+        except Exception as exc:
+            print(f'{type(exc).__name__}: {exc}; tentativa {attempt + 1}/3', flush=True)
             if attempt == 2:
                 raise
             time.sleep(10 * (attempt + 1))
@@ -149,6 +152,8 @@ def fetch_adaptive(locations, today):
         return fetch_batch(locations, today), []
     except RateLimitError:
         raise  # Never split a throttled batch into even more requests.
+    except (TimeoutError, URLError, OSError) as exc:
+        return [], [dict(cidade=r['Cidade'], uf=r['UF'], erro=str(exc)) for r in locations]
     except Exception as exc:
         if len(locations) == 1:
             row = locations[0]
@@ -173,26 +178,48 @@ def main():
         locations = list(csv.DictReader(f, delimiter=';'))
     if not locations:
         raise ValueError('Lista de cidades vazia.')
+    checkpoint = ROOT / 'historico/coleta-pendente.json'
+    cities = {key(c): c for c in old['cidades']}
+    for city in cities.values():
+        if 'atualizado_em' not in city:
+            city['atualizado_em'] = old.get('atualizado_em') if old.get('status') == 'completo' else None
+    resumed = []
+    if checkpoint.exists():
+        cached = json.loads(checkpoint.read_text(encoding='utf-8'))
+        _, resumed = select_pending(locations, cached, today)
+        for city in resumed:
+            cities[key(city)] = merge_city(cities.get(key(city), {}), city)
+        print(f'Retomada: {len(resumed)} cidades recuperadas do progresso salvo.', flush=True)
+    old = dict(old, cidades=list(cities.values()))
     pending, reused = select_pending(locations, old, today)
     print(f'Cadastro: {len(locations)} cidades; {len(reused)} já atualizadas hoje; '
           f'{len(pending)} precisam de coleta.', flush=True)
-    if not pending:
+    if not pending and not resumed:
         print('Base atualizada: nenhuma consulta à API necessária.', flush=True)
         return
     new, errors = [], []
+    progress = {key(c): c for c in resumed}
     started = time.monotonic()
     batches = math.ceil(len(pending) / BATCH_SIZE)
     for offset in range(0, len(pending), BATCH_SIZE):
         batch = pending[offset:offset + BATCH_SIZE]
+        if time.monotonic() - started >= COLLECTION_BUDGET:
+            raise RuntimeError('Tempo de coleta esgotado; progresso salvo para retomada.')
+        print(f'Iniciando lote {offset // BATCH_SIZE + 1}/{batches}', flush=True)
         found, failed = fetch_adaptive(batch, today)
+        for city in found:
+            city['atualizado_em'] = now.isoformat(timespec='seconds')
+            progress[key(city)] = city
+        save_atomic(checkpoint, json.dumps(dict(cidades=list(progress.values()), status='parcial'),
+                                          ensure_ascii=False, allow_nan=False))
         new.extend(found)
         errors.extend(failed)
         elapsed = time.monotonic() - started
         done = min(offset + BATCH_SIZE, len(pending))
         print(f'Lote {offset // BATCH_SIZE + 1}/{batches}: {done}/{len(pending)} cidades pendentes; '
               f'{len(errors)} falhas; {elapsed:.1f}s decorridos', flush=True)
-    if len(new) < math.ceil(len(pending) * .95):
-        raise RuntimeError('Menos de 95% das cidades atualizadas. Base anterior preservada.')
+    if len(new) + len(reused) < math.ceil(len(locations) * .95):
+        raise RuntimeError('Menos de 95% das cidades atualizadas. Progresso salvo; painel anterior preservado.')
     cities = {key(c): c for c in old['cidades']}
     # Freeze legacy provenance before advancing the global update timestamp.
     for city in cities.values():
@@ -213,6 +240,7 @@ def main():
     # Daily snapshot also preserves the forecast as it was issued on that date.
     save_atomic(ROOT / 'historico' / (today + '.json'), content)
     save_atomic(target, 'window.DADOS_CLIMA = ' + content + ';\n')
+    checkpoint.unlink(missing_ok=True)
     print(f'Base salva: {len(cities)} cidades, {len(dates)} datas.')
 
 if __name__ == '__main__':

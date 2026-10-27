@@ -17,7 +17,7 @@ jobs:
   atualizar:
     if: github.event_name != 'issues' || ((startsWith(github.event.issue.title, '[Cadastro de cidade]') || startsWith(github.event.issue.title, '[Remoção de cidade]')) && github.event.issue.user.login == github.repository_owner)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,10 +42,12 @@ jobs:
             git push origin HEAD:main
           fi
       - name: Consultar clima e preservar histórico
+        id: coleta
+        timeout-minutes: 75
         if: github.event_name != 'push' && !startsWith(github.event.issue.title, '[Remoção de cidade]')
         run: python scripts/update_weather.py
-      - name: Salvar dados no repositório
-        if: github.event_name != 'push' && !startsWith(github.event.issue.title, '[Remoção de cidade]')
+      - name: Salvar dados e progresso no repositório
+        if: always() && steps.coleta.outcome != 'skipped' && steps.coleta.outcome != ''
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
