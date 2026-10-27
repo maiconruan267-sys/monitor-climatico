@@ -5,6 +5,12 @@ on:
   issues:
     types: [opened, reopened]
   workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: 'Forçar nova coleta de todas as cidades (teste de desempenho)'
+        type: boolean
+        default: false
+        required: false
 permissions:
   contents: write
   pages: write
@@ -25,6 +31,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Instalar cliente HTTP
+        run: python -m pip install -r requirements.txt
       - name: Validar regras de histórico e cadastro
         run: python -m unittest discover -s tests
       - name: Aplicar solicitação de cidade
@@ -45,6 +53,8 @@ jobs:
         id: coleta
         timeout-minutes: 75
         if: github.event_name != 'push' && !startsWith(github.event.issue.title, '[Remoção de cidade]')
+        env:
+          FORCE_REFRESH: ${{ inputs.force_refresh || false }}
         run: python scripts/update_weather.py
       - name: Salvar dados e progresso no repositório
         if: always() && steps.coleta.outcome != 'skipped' && steps.coleta.outcome != ''

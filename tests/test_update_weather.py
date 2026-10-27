@@ -99,3 +99,6 @@ class IncrementalTests(unittest.TestCase):
                 fetch.reset_mock()
                 module.main()
                 fetch.assert_not_called()
+                fetch.return_value = ([city, fresh], [])
+                module.main(force_refresh=True)
+                fetch.assert_called_once_with([loc, added], '2026-10-26')

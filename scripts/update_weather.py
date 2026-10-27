@@ -2,12 +2,12 @@
 import csv
 import json
 import math
+import os
+import requests
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +94,23 @@ BATCH_SIZE = 7
 REQUEST_INTERVAL = 10.0
 COLLECTION_BUDGET = 70 * 60
 _next_request = 0.0
+_session = None
+
+def get_session():
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update({'User-Agent': 'Monitor-Climatico-Sul/11.0'})
+        # All retries are explicit below, so they obey the global rate limiter.
+        _session.mount('https://', requests.adapters.HTTPAdapter(max_retries=0))
+    return _session
+
+def close_session():
+    global _session
+    if _session is not None:
+        _session.close()
+        _session = None
+
 
 class RateLimitError(RuntimeError):
     pass
@@ -108,13 +125,16 @@ def fetch_batch(locations, today):
         longitude=','.join(r['Longitude'].replace(',', '.') for r in locations),
         daily=','.join(FIELDS.values()), timezone='America/Sao_Paulo',
         wind_speed_unit='kmh', past_days=15, forecast_days=16))
-    req = Request('https://api.open-meteo.com/v1/forecast?' + query,
-                  headers={'User-Agent': 'Monitor-Climatico-Sul/10.1'})
+    url = 'https://api.open-meteo.com/v1/forecast?' + query
     for attempt in range(3):
         wait_for_request()
+        request_started = time.monotonic()
         try:
-            with urlopen(req, timeout=30) as response:
-                result = json.load(response)
+            with get_session().get(url, timeout=(6.1, 30)) as response:
+                response.raise_for_status()
+                result = response.json()
+            print(f'Resposta recebida em {time.monotonic() - request_started:.1f}s; '
+                  f'{len(locations)} cidades; tentativa {attempt + 1}/3', flush=True)
             if not isinstance(result, list):
                 result = [result]
             if len(result) != len(locations):
@@ -128,12 +148,13 @@ def fetch_batch(locations, today):
                     timezone='America/Sao_Paulo',
                     daily={'time': item['daily']['time'], **{k: item['daily'][v] for k,v in FIELDS.items()}}))
             return output
-        except HTTPError as exc:
-            print(f'HTTP {exc.code}; lote de {len(locations)} cidades; tentativa {attempt + 1}/3', flush=True)
-            if exc.code == 429:
+        except requests.HTTPError as exc:
+            code = exc.response.status_code
+            print(f'HTTP {code}; lote de {len(locations)} cidades; tentativa {attempt + 1}/3', flush=True)
+            if code == 429:
                 if attempt == 2:
                     raise RateLimitError('Limite da API persistente; base anterior preservada.') from exc
-                header = exc.headers.get('Retry-After', '') if exc.headers else ''
+                header = exc.response.headers.get('Retry-After', '')
                 delay = max(60 * (attempt + 1), float(header) if header.isdigit() else 0)
                 print(f'API limitou consultas; aguardando {delay:.0f}s.', flush=True)
                 time.sleep(delay)
@@ -141,6 +162,13 @@ def fetch_batch(locations, today):
                 raise
             else:
                 time.sleep(10 * (attempt + 1))
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            close_session()
+            print(f'Conexão falhou após {time.monotonic() - request_started:.1f}s: '
+                  f'{type(exc).__name__}: {exc}; tentativa {attempt + 1}/3', flush=True)
+            if attempt == 2:
+                raise
+            time.sleep(2 * (attempt + 1))
         except Exception as exc:
             print(f'{type(exc).__name__}: {exc}; tentativa {attempt + 1}/3', flush=True)
             if attempt == 2:
@@ -152,7 +180,7 @@ def fetch_adaptive(locations, today):
         return fetch_batch(locations, today), []
     except RateLimitError:
         raise  # Never split a throttled batch into even more requests.
-    except (TimeoutError, URLError, OSError) as exc:
+    except (requests.RequestException, TimeoutError, OSError) as exc:
         return [], [dict(cidade=r['Cidade'], uf=r['UF'], erro=str(exc)) for r in locations]
     except Exception as exc:
         if len(locations) == 1:
@@ -169,7 +197,7 @@ def save_atomic(path, content):
     temp.write_text(content, encoding='utf-8')
     temp.replace(path)
 
-def main():
+def main(force_refresh=False):
     target = ROOT / '_sistema/dados_clima.js'
     old = read_payload(target)  # Fail closed: never silently discard history.
     now = datetime.now(ZoneInfo('America/Sao_Paulo'))
@@ -184,7 +212,7 @@ def main():
         if 'atualizado_em' not in city:
             city['atualizado_em'] = old.get('atualizado_em') if old.get('status') == 'completo' else None
     resumed = []
-    if checkpoint.exists():
+    if checkpoint.exists() and not force_refresh:
         cached = json.loads(checkpoint.read_text(encoding='utf-8'))
         _, resumed = select_pending(locations, cached, today)
         for city in resumed:
@@ -192,6 +220,9 @@ def main():
         print(f'Retomada: {len(resumed)} cidades recuperadas do progresso salvo.', flush=True)
     old = dict(old, cidades=list(cities.values()))
     pending, reused = select_pending(locations, old, today)
+    if force_refresh:
+        pending, reused = locations, []
+        print('Teste de coleta completa: consultar todas as cidades novamente.', flush=True)
     print(f'Cadastro: {len(locations)} cidades; {len(reused)} já atualizadas hoje; '
           f'{len(pending)} precisam de coleta.', flush=True)
     if not pending and not resumed:
@@ -244,5 +275,8 @@ def main():
     print(f'Base salva: {len(cities)} cidades, {len(dates)} datas.')
 
 if __name__ == '__main__':
-    main()
+    try:
+        main(force_refresh=os.environ.get('FORCE_REFRESH', '').lower() == 'true')
+    finally:
+        close_session()
 
