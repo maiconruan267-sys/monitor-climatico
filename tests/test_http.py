@@ -46,3 +46,26 @@ class HttpTests(unittest.TestCase):
                 w.fetch_adaptive(self.rows,'2026-10-27')
             self.assertEqual(session.get.call_count,3)
             self.assertEqual([x.args[0] for x in sleep.call_args_list],[120,120])
+
+    def test_missing_data_keeps_valid_city_without_retry_or_split(self):
+        import copy
+        daily = copy.deepcopy(self.daily)
+        daily['temperature_2m_min'][-1] = None
+        response = self.response()
+        response.json.return_value = [{'daily': self.daily}, {'daily': daily}]
+        session = MagicMock()
+        session.get.return_value = response
+        with patch.object(w, 'get_session', return_value=session), patch.object(w, 'wait_for_request'):
+            found, errors = w.fetch_adaptive(self.rows * 2, '2026-10-27')
+        self.assertEqual(session.get.call_count, 1)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(errors[0]['campos_datas']['temperature_2m_min'], ['2026-11-11'])
+        self.assertEqual(errors[0]['tipo'], 'dados_incompletos')
+
+    def test_reports_all_missing_essential_fields_and_dates(self):
+        self.daily['temperature_2m_min'][0] = None
+        self.daily['precipitation_sum'][-1] = float('nan')
+        with self.assertRaises(w.IncompleteDataError) as caught:
+            w.validate_daily(self.daily, '2026-10-27')
+        self.assertEqual(caught.exception.missing, {
+            'temperature_2m_min': ['2026-10-12'], 'precipitation_sum': ['2026-11-11']})

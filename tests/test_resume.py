@@ -43,3 +43,28 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(len(errors), 7)
         self.assertEqual(found, [])
+
+    def test_general_missing_data_stops_early_and_preserves_published_base(self):
+        city, loc, payload = fixtures.IncrementalTests().fixture()
+        payload['atualizado_em'] = '2026-10-25T09:00:00-03:00'
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root/'_sistema').mkdir()
+            target = root/'_sistema/dados_clima.js'
+            original = 'window.DADOS_CLIMA = '+json.dumps(payload)+';'
+            target.write_text(original)
+            rows = [dict(loc, Cidade=str(i)) for i in range(35)]
+            with (root/'_sistema/Locais.csv').open('w') as f:
+                writer = csv.DictWriter(f,fieldnames=list(loc),delimiter=';')
+                writer.writeheader(); writer.writerows(rows)
+            def missing(batch, today):
+                return [], [dict(cidade=r['Cidade'],uf=r['UF'],tipo='dados_incompletos',
+                                 erro='ausente',campos_datas={'temperature_2m_min':['2026-11-10']}) for r in batch]
+            with patch.object(w,'ROOT',root), patch.object(w,'fetch_adaptive',side_effect=missing) as fetch:
+                with self.assertRaisesRegex(RuntimeError,'3 cargas consecutivas'):
+                    w.main()
+            self.assertEqual(fetch.call_count,3)
+            self.assertEqual(target.read_text(),original)
+            saved=json.loads((root/'historico/coleta-pendente.json').read_text())
+            self.assertEqual(len(saved['erros']),21)
+            self.assertEqual(saved['cidades'],[])

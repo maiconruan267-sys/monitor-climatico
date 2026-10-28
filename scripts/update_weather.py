@@ -79,16 +79,37 @@ def select_pending(locations, payload, today):
             pending.append(location)
     return pending, reused
 
+class IncompleteDataError(ValueError):
+    """Valid HTTP response whose weather data is not ready yet."""
+    def __init__(self, message, missing=None):
+        super().__init__(message)
+        self.missing = missing or {}
+
+class IncompleteBatchError(IncompleteDataError):
+    def __init__(self, found, errors):
+        super().__init__('Dados incompletos no lote; nova tentativa imediata dispensada.')
+        self.found, self.errors = found, errors
+
 def validate_daily(daily, today):
+    if not isinstance(daily, dict):
+        raise IncompleteDataError('Resposta sem bloco daily válido.')
     dates = daily.get('time', [])
-    if len(dates) != 31 or dates[15] != today or dates != sorted(set(dates)):
-        raise ValueError('Janela incompleta: esperado D-15 a D+15.')
+    expected = [(date.fromisoformat(today) + timedelta(days=i)).isoformat() for i in range(-15, 16)]
+    if dates != expected:
+        raise IncompleteDataError('Janela incompleta: esperado D-15 a D+15.',
+                                  {'time': [d for d in expected if d not in (dates or [])]})
     for field in FIELDS.values():
-        if len(daily.get(field, [])) != len(dates):
-            raise ValueError('Série incompleta: ' + field)
+        if not isinstance(daily.get(field), list) or len(daily[field]) != len(dates):
+            raise IncompleteDataError('Série incompleta: ' + field)
+    missing = {}
     for field in ('temperature_2m_min', 'temperature_2m_max', 'precipitation_sum', 'weather_code'):
-        if any(v is None for v in daily[field]):
-            raise ValueError('Valores essenciais ausentes: ' + field)
+        invalid = [dates[i] for i, v in enumerate(daily[field])
+                   if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)]
+        if invalid:
+            missing[field] = invalid
+    if missing:
+        detail = '; '.join(f"{field}: {', '.join(days)}" for field, days in missing.items())
+        raise IncompleteDataError('Valores essenciais ausentes/inválidos — ' + detail, missing)
 
 BATCH_SIZE = 7
 REQUEST_INTERVAL = 10.0
@@ -138,16 +159,28 @@ def fetch_batch(locations, today):
             if not isinstance(result, list):
                 result = [result]
             if len(result) != len(locations):
-                raise ValueError('Quantidade de cidades incompleta no lote.')
-            output = []
+                raise IncompleteBatchError([], [dict(cidade=r['Cidade'], uf=r['UF'],
+                    tipo='dados_incompletos', erro='Quantidade de cidades incompleta no lote.') for r in locations])
+            output, errors = [], []
             for local, item in zip(locations, result):
-                validate_daily(item['daily'], today)
+                try:
+                    validate_daily(item.get('daily') if isinstance(item, dict) else None, today)
+                except IncompleteDataError as exc:
+                    error = dict(cidade=local['Cidade'], uf=local['UF'], tipo='dados_incompletos',
+                                 erro=str(exc), campos_datas=exc.missing)
+                    errors.append(error)
+                    print(f"Dados pendentes: {local['Cidade']}/{local['UF']}: {exc}", flush=True)
+                    continue
                 output.append(dict(cidade=local['Cidade'], uf=local['UF'],
                     latitude=float(local['Latitude'].replace(',', '.')),
                     longitude=float(local['Longitude'].replace(',', '.')),
                     timezone='America/Sao_Paulo',
                     daily={'time': item['daily']['time'], **{k: item['daily'][v] for k,v in FIELDS.items()}}))
+            if errors:
+                raise IncompleteBatchError(output, errors)
             return output
+        except IncompleteDataError:
+            raise  # Missing data does not improve by splitting or immediately retrying.
         except requests.HTTPError as exc:
             code = exc.response.status_code
             print(f'HTTP {code}; lote de {len(locations)} cidades; tentativa {attempt + 1}/3', flush=True)
@@ -178,6 +211,8 @@ def fetch_batch(locations, today):
 def fetch_adaptive(locations, today):
     try:
         return fetch_batch(locations, today), []
+    except IncompleteBatchError as exc:
+        return exc.found, exc.errors
     except RateLimitError:
         raise  # Never split a throttled batch into even more requests.
     except (requests.RequestException, TimeoutError, OSError) as exc:
@@ -230,6 +265,7 @@ def main(force_refresh=False):
         return
     new, errors = [], []
     progress = {key(c): c for c in resumed}
+    unavailable_batches = 0
     started = time.monotonic()
     batches = math.ceil(len(pending) / BATCH_SIZE)
     for offset in range(0, len(pending), BATCH_SIZE):
@@ -241,10 +277,17 @@ def main(force_refresh=False):
         for city in found:
             city['atualizado_em'] = now.isoformat(timespec='seconds')
             progress[key(city)] = city
-        save_atomic(checkpoint, json.dumps(dict(cidades=list(progress.values()), status='parcial'),
+        save_atomic(checkpoint, json.dumps(dict(cidades=list(progress.values()), status='parcial',
+                                                   atualizado_em=now.isoformat(), erros=errors + failed),
                                           ensure_ascii=False, allow_nan=False))
         new.extend(found)
         errors.extend(failed)
+        unavailable_batches = unavailable_batches + 1 if (not found and failed and
+            all(e.get('tipo') == 'dados_incompletos' for e in failed)) else 0
+        if unavailable_batches >= 3:
+            raise RuntimeError('API retornou dados incompletos em 3 cargas consecutivas. '
+                               'Coleta interrompida sem repetir consultas; diagnóstico e progresso salvos. '
+                               'Tente novamente mais tarde, quando a fonte disponibilizar os dados.')
         elapsed = time.monotonic() - started
         done = min(offset + BATCH_SIZE, len(pending))
         print(f'Lote {offset // BATCH_SIZE + 1}/{batches}: {done}/{len(pending)} cidades pendentes; '
