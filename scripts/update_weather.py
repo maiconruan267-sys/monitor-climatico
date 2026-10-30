@@ -90,7 +90,7 @@ class IncompleteBatchError(IncompleteDataError):
         super().__init__('Dados incompletos no lote; nova tentativa imediata dispensada.')
         self.found, self.errors = found, errors
 
-def validate_daily(daily, today):
+def validate_daily(daily, today, allow_missing_last_day=False):
     if not isinstance(daily, dict):
         raise IncompleteDataError('Resposta sem bloco daily válido.')
     dates = daily.get('time', [])
@@ -107,6 +107,8 @@ def validate_daily(daily, today):
                    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)]
         if invalid:
             missing[field] = invalid
+    if missing and allow_missing_last_day and all(days == [expected[-1]] for days in missing.values()):
+        return missing
     if missing:
         detail = '; '.join(f"{field}: {', '.join(days)}" for field, days in missing.items())
         raise IncompleteDataError('Valores essenciais ausentes/inválidos — ' + detail, missing)
@@ -164,7 +166,13 @@ def fetch_batch(locations, today):
             output, errors = [], []
             for local, item in zip(locations, result):
                 try:
-                    validate_daily(item.get('daily') if isinstance(item, dict) else None, today)
+                    missing = validate_daily(item.get('daily') if isinstance(item, dict) else None, today,
+                                             allow_missing_last_day=True) or {}
+                    if missing:
+                        print(f"Último dia pendente: {local['Cidade']}/{local['UF']}; consultar novamente na próxima atualização.", flush=True)
+                        # JSON and the dashboard must see null, never NaN or a fabricated zero.
+                        for field in missing:
+                            item['daily'][field][-1] = None
                 except IncompleteDataError as exc:
                     error = dict(cidade=local['Cidade'], uf=local['UF'], tipo='dados_incompletos',
                                  erro=str(exc), campos_datas=exc.missing)
@@ -174,7 +182,7 @@ def fetch_batch(locations, today):
                 output.append(dict(cidade=local['Cidade'], uf=local['UF'],
                     latitude=float(local['Latitude'].replace(',', '.')),
                     longitude=float(local['Longitude'].replace(',', '.')),
-                    timezone='America/Sao_Paulo',
+                    timezone='America/Sao_Paulo', pendencias=missing,
                     daily={'time': item['daily']['time'], **{k: item['daily'][v] for k,v in FIELDS.items()}}))
             if errors:
                 raise IncompleteBatchError(output, errors)
@@ -303,7 +311,9 @@ def main(force_refresh=False):
         city['atualizado_em'] = now.isoformat(timespec='seconds')
         cities[key(city)] = merge_city(cities.get(key(city), {}), city)
     dates = sorted({day for c in cities.values() for day in c['daily']['time']})
-    payload = dict(old, duracao_coleta_segundos=round(time.monotonic() - started, 1), tamanho_lote=BATCH_SIZE, status='parcial' if errors else 'completo',
+    pending_days = [dict(cidade=c['cidade'], uf=c['uf'], campos_datas=c['pendencias'])
+                    for c in cities.values() if c.get('pendencias')]
+    payload = dict(old, pendencias_previsao=pending_days, duracao_coleta_segundos=round(time.monotonic() - started, 1), tamanho_lote=BATCH_SIZE, status='parcial' if errors or pending_days else 'completo',
         atualizado_em=now.isoformat(timespec='seconds'), hoje=today,
         total_esperado=len(locations), total_retornado=len(new) + len(reused),
         total_consultado=len(pending), total_atualizado=len(new), total_reaproveitado=len(reused),

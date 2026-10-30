@@ -50,7 +50,7 @@ class HttpTests(unittest.TestCase):
     def test_missing_data_keeps_valid_city_without_retry_or_split(self):
         import copy
         daily = copy.deepcopy(self.daily)
-        daily['temperature_2m_min'][-1] = None
+        daily['temperature_2m_min'][-2] = None
         response = self.response()
         response.json.return_value = [{'daily': self.daily}, {'daily': daily}]
         session = MagicMock()
@@ -59,7 +59,7 @@ class HttpTests(unittest.TestCase):
             found, errors = w.fetch_adaptive(self.rows * 2, '2026-10-27')
         self.assertEqual(session.get.call_count, 1)
         self.assertEqual(len(found), 1)
-        self.assertEqual(errors[0]['campos_datas']['temperature_2m_min'], ['2026-11-11'])
+        self.assertEqual(errors[0]['campos_datas']['temperature_2m_min'], ['2026-11-10'])
         self.assertEqual(errors[0]['tipo'], 'dados_incompletos')
 
     def test_reports_all_missing_essential_fields_and_dates(self):
@@ -69,3 +69,31 @@ class HttpTests(unittest.TestCase):
             w.validate_daily(self.daily, '2026-10-27')
         self.assertEqual(caught.exception.missing, {
             'temperature_2m_min': ['2026-10-12'], 'precipitation_sum': ['2026-11-11']})
+
+    def test_missing_last_day_is_published_and_requeried_then_filled(self):
+        import copy
+        self.daily['temperature_2m_min'][-1] = None
+        session = MagicMock()
+        session.get.return_value = self.response()
+        with patch.object(w, 'get_session', return_value=session), patch.object(w, 'wait_for_request'):
+            found, errors = w.fetch_adaptive(self.rows, '2026-10-27')
+        self.assertEqual(errors, [])
+        partial = found[0]
+        self.assertIsNone(partial['daily']['min'][-1])
+        partial['atualizado_em'] = '2026-10-27T07:00:00-03:00'
+        payload = dict(cidades=[partial], status='parcial')
+        for day in ('2026-10-27', '2026-10-28'):
+            pending, reused = w.select_pending(self.rows, payload, day)
+            self.assertEqual(pending, self.rows)
+            self.assertEqual(reused, [])
+        # On the next day the previously missing date is D+14 and gets real data.
+        self.daily = {'time': [(date(2026,10,28)+timedelta(days=i)).isoformat() for i in range(-15,16)],
+                      **{field: [12]*31 for field in w.FIELDS.values()}}
+        session.get.return_value = self.response()
+        with patch.object(w, 'get_session', return_value=session), patch.object(w, 'wait_for_request'):
+            complete = w.fetch_batch(self.rows, '2026-10-28')[0]
+        merged = w.merge_city(partial, complete)
+        idx = merged['daily']['time'].index('2026-11-11')
+        self.assertEqual(merged['daily']['min'][idx], 12)
+        self.assertEqual(merged['pendencias'], {})
+        self.assertIn('2026-10-12', merged['daily']['time'])

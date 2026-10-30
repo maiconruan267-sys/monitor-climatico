@@ -68,3 +68,29 @@ class ResumeTests(unittest.TestCase):
             saved=json.loads((root/'historico/coleta-pendente.json').read_text())
             self.assertEqual(len(saved['erros']),21)
             self.assertEqual(saved['cidades'],[])
+
+    def test_publishes_available_days_and_records_pending_forecast(self):
+        city, loc, payload = fixtures.IncrementalTests().fixture()
+        payload['atualizado_em'] = '2026-10-25T09:00:00-03:00'
+        city['daily']['min'][-1] = None
+        city['pendencias'] = {'temperature_2m_min': ['2026-11-10']}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root/'_sistema').mkdir()
+            target = root/'_sistema/dados_clima.js'
+            target.write_text('window.DADOS_CLIMA = '+json.dumps(payload)+';')
+            with (root/'_sistema/Locais.csv').open('w') as f:
+                writer = csv.DictWriter(f, fieldnames=list(loc), delimiter=';')
+                writer.writeheader(); writer.writerow(loc)
+            with patch.object(w, 'ROOT', root), patch.object(w, 'datetime') as clock:
+                clock.now.return_value = datetime.fromisoformat('2026-10-26T07:00:00-03:00')
+                clock.fromisoformat.side_effect = datetime.fromisoformat
+                with patch.object(w, 'fetch_adaptive', return_value=([city], [])):
+                    w.main()
+            saved = w.read_payload(target)
+            self.assertEqual(saved['status'], 'parcial')
+            self.assertEqual(saved['total_atualizado'], 1)
+            self.assertEqual(len(saved['pendencias_previsao']), 1)
+            self.assertIsNone(saved['cidades'][0]['daily']['min'][-1])
+            self.assertEqual(saved['cidades'][0]['daily']['min'][-2], 1)
+            self.assertTrue((root/'historico/2026-10-26.json').exists())
