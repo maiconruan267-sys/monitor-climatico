@@ -224,7 +224,12 @@ def fetch_adaptive(locations, today):
     except RateLimitError:
         raise  # Never split a throttled batch into even more requests.
     except (requests.RequestException, TimeoutError, OSError) as exc:
-        return [], [dict(cidade=r['Cidade'], uf=r['UF'], erro=str(exc)) for r in locations]
+        transient = isinstance(exc, (requests.ConnectionError, requests.Timeout, TimeoutError, OSError))
+        if isinstance(exc, requests.HTTPError):
+            transient = exc.response is not None and (exc.response.status_code == 408 or
+                                                       500 <= exc.response.status_code < 600)
+        return [], [dict(cidade=r['Cidade'], uf=r['UF'], erro=str(exc),
+                         tipo='falha_transitoria' if transient else 'falha_http') for r in locations]
     except Exception as exc:
         if len(locations) == 1:
             row = locations[0]
@@ -300,6 +305,30 @@ def main(force_refresh=False):
         done = min(offset + BATCH_SIZE, len(pending))
         print(f'Lote {offset // BATCH_SIZE + 1}/{batches}: {done}/{len(pending)} cidades pendentes; '
               f'{len(errors)} falhas; {elapsed:.1f}s decorridos', flush=True)
+    # One bounded recovery pass, after the provider has had time to recover.
+    retry_keys = {key(e) for e in errors if e.get('tipo') == 'falha_transitoria'}
+    retry_locations = [r for r in pending
+                       if (r['UF'].strip().upper(), r['Cidade'].strip().upper()) in retry_keys]
+    if retry_locations:
+        print(f'Recuperação final: {len(retry_locations)} cidades com falha temporária.', flush=True)
+    recovered = 0
+    for offset in range(0, len(retry_locations), BATCH_SIZE):
+        if time.monotonic() - started >= COLLECTION_BUDGET:
+            raise RuntimeError('Tempo de coleta esgotado; progresso salvo para retomada.')
+        batch = retry_locations[offset:offset + BATCH_SIZE]
+        found, failed = fetch_adaptive(batch, today)
+        attempted = {(r['UF'].strip().upper(), r['Cidade'].strip().upper()) for r in batch}
+        errors = [e for e in errors if key(e) not in attempted] + failed
+        for city in found:
+            city['atualizado_em'] = now.isoformat(timespec='seconds')
+            progress[key(city)] = city
+        new.extend(found)
+        recovered += len(found)
+        save_atomic(checkpoint, json.dumps(dict(cidades=list(progress.values()), status='parcial',
+                                               atualizado_em=now.isoformat(), erros=errors),
+                                          ensure_ascii=False, allow_nan=False))
+        print(f'Recuperação final: {recovered}/{len(retry_locations)} cidades recuperadas; '
+              f'{len(errors)} falhas restantes.', flush=True)
     if len(new) + len(reused) < math.ceil(len(locations) * .95):
         raise RuntimeError('Menos de 95% das cidades atualizadas. Progresso salvo; painel anterior preservado.')
     cities = {key(c): c for c in old['cidades']}
